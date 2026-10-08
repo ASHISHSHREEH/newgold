@@ -1,0 +1,144 @@
+===============================================================================
+ STOP / TAKE-PROFIT MANAGEMENT — DESIGN OPTIONS & DECISION
+ newgold — EMACross strategy + MT5 (FxPro demo)
+ Written 2026-10-07
+===============================================================================
+
+-------------------------------------------------------------------------------
+ THE PROBLEM (why this doc exists)
+-------------------------------------------------------------------------------
+Right now the exit of a position is managed in TWO places at once, and they
+do not agree on the price levels:
+
+  1. BROKER-SIDE (MT5)
+     - strategy/ema_cross.py _open_long() attaches SL:/TP: tags to the entry
+       order. adapters/mt5/execution.py reads those tags and sends a real
+       stop-loss + take-profit to MT5 (request["sl"], request["tp"]).
+     - These levels are computed from the SIGNAL-BAR close and are STATIC:
+       they are set once at entry and never updated.
+
+  2. STRATEGY-SIDE (in-process)
+     - strategy/ema_cross.py _manage_positions() runs every bar close:
+       checks SL/TP hit, moves SL to break-even, then trails the SL.
+     - These levels are computed from the FILL-TIME ATR and MOVE over the
+       life of the trade. They are NOT mirrored back to the broker.
+
+Because both exist with different numbers, whichever fires first wins and the
+other becomes stale. Observed live on WTI (2026-10-07):
+
+     entry        89.26
+     broker TP    90.260  (static tag)
+     internal TP  90.33   (fill-time)
+     trailed SL   89.69   (strategy, after break-even)
+
+   -> Price spiked; broker TP (90.260) fired at the venue, closing at 90.261.
+   -> One bar later the strategy's trail check saw low=89.59, thought "SL HIT",
+      and submitted a close. The venue returned retcode 10013 (already closed);
+      the adapter gracefully synthesized the close fill. Net: small profit kept.
+   -> BUT the trade was logged as reason=SL when it actually closed at TP.
+
+Two distinct issues come out of this:
+   (A) Mislabeled close reason in the trade history.   <-- FIXED (see below)
+   (B) The trailing stop is partly fiction: the broker still holds the ORIGINAL
+       wide SL, so a hard intrabar drop stops you out at the old level, not the
+       trailed one. This is the design decision still to make.
+
+-------------------------------------------------------------------------------
+ WHAT WAS ALREADY FIXED (2026-10-07)  — issue (A)
+-------------------------------------------------------------------------------
+monitor_actor.py now reconciles the close reason against the ACTUAL exit price
+instead of trusting the strategy's pre-close guess. See _reconcile_reason():
+a price-level exit ("TP"/"SL") is re-attributed to whichever level the fill
+landed closest to; event-driven reasons (EMA, SHUTDOWN, CLOSED) are trusted
+as-is. The WTI case above now logs reason=TP correctly.
+
+This is a reporting fix only. It does NOT change how trades are entered or
+exited — issue (B) below is still open.
+
+-------------------------------------------------------------------------------
+ THE DECISION — WHO OWNS THE STOP?
+-------------------------------------------------------------------------------
+
+OPTION A — STRATEGY OWNS THE STOP
+---------------------------------
+  What changes:
+    - Stop sending SL:/TP: tags on the entry order (drop them in _open_long).
+    - All exits handled by _manage_positions() on bar close, as it already does.
+  Pros:
+    - Single source of truth. No divergence, no 10013 reconciliation races.
+    - Break-even + trailing already implemented and working.
+    - No changes to the hand-written MT5 adapter.
+  Cons:
+    - Exits only evaluated on BAR CLOSE (15-min bars currently). No intrabar
+      protection: a sharp move between closes is unhedged until the next bar.
+    - If the bot process dies, there is NO stop at the broker at all — the
+      position sits naked until the bot restarts.
+  Effort: small (remove tag construction, maybe a config flag).
+
+OPTION B — BROKER OWNS THE STOP
+-------------------------------
+  What changes:
+    - Drop _manage_positions() internal SL/TP/trailing.
+    - Build an ORDER-MODIFY path in adapters/mt5/execution.py so that when the
+      strategy wants to move the stop (break-even / trail), it updates the
+      broker-side SL/TP on the live position.
+  Pros:
+    - Real intrabar protection at the venue (ticks, not bar closes).
+    - Stop survives a bot/process crash.
+  Cons:
+    - Requires new hand-written MT5 adapter code (position modify / SL-TP
+      update). Per CLAUDE.md the adapter is written by hand and must NOT be
+      auto-generated — this is work for the user, not for Claude.
+    - Trailing cadence limited by how often the strategy pushes updates.
+  Effort: medium (new adapter capability + wiring + testing).
+
+OPTION C — HYBRID (broker = disaster stop, strategy = active management)
+------------------------------------------------------------------------
+  What changes:
+    - Keep a STATIC, WIDE broker-side SL as a catastrophe backstop only
+      (e.g. well beyond the strategy SL). Optionally a static broker TP.
+    - Strategy continues break-even + trailing and normally closes via market
+      BEFORE the wide broker stop is ever reached.
+  Pros:
+    - Best of both: intrabar + crash protection from the broker backstop,
+      active trailing from the strategy.
+    - They no longer "disagree" in practice because the broker level is set
+      far away and is only a safety net.
+  Cons:
+    - Two mechanisms still exist; needs care that the backstop is genuinely
+      wider than anything the strategy will do, so the strategy always fires
+      first in normal conditions.
+    - Still needs the reconciliation fix (already done) for the rare backstop
+      hit.
+  Effort: small-to-medium (set wide tags; no adapter modify strictly required
+    if the backstop stays static).
+
+-------------------------------------------------------------------------------
+ RECOMMENDATION
+-------------------------------------------------------------------------------
+Near term: OPTION A (strategy owns the stop).
+  - It removes the divergence immediately, needs no adapter work (respecting the
+    CLAUDE.md rule that MT5 adapter code is hand-written), and the trailing logic
+    already exists and works. Accept the bar-close-only limitation for now — on
+    a demo account with 15-min bars the exposure window is bounded and the point
+    right now is to validate the strategy, not to harden execution.
+
+Longer term: move to OPTION C (hybrid).
+  - Once you want crash/intrabar safety, add a WIDE static broker SL as a pure
+    backstop. This gives protection without reintroducing the level-fight,
+    because the strategy's trail is always tighter and fires first.
+  - OPTION B (broker fully owns, with live modify) is only worth the adapter
+    work if you later want the trail itself to live at the venue tick-by-tick.
+
+Whatever is chosen, the close-reason reconciliation already added to
+monitor_actor.py stays — it is correct under all three options.
+
+-------------------------------------------------------------------------------
+ KNOWN RELATED ISSUE (not fixed, noted for later)
+-------------------------------------------------------------------------------
+rr_ratio in monitor_actor._on_position_closed mixes units: profit is in account
+/quote currency (e.g. USD) while risk is in PRICE points (entry - sl). The
+resulting rr is not a true reward/risk multiple. Fix separately by expressing
+both in the same unit (e.g. price move achieved / initial price risk, or PnL /
+risk-in-PnL-terms).
+===============================================================================

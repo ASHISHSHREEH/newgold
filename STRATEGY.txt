@@ -1,0 +1,329 @@
+================================================================================
+  EMA CROSSOVER STRATEGY — COMPLETE GUIDE
+  NautilusTrader + MetaTrader5 (FxPro Demo)
+================================================================================
+
+--------------------------------------------------------------------------------
+1. WHAT THIS SYSTEM IS
+--------------------------------------------------------------------------------
+
+This is a live and backtest algorithmic trading system built on NautilusTrader
+(v1.231.0) that connects to a MetaTrader5 terminal (FxPro demo account) and
+trades multiple instruments automatically using an EMA crossover strategy.
+
+Instruments traded (live):
+  GOLD, #USNDAQ100, #USSPX500, WTI, BITCOIN, #Japan225
+
+Account: FxPro demo, JPY-denominated, retail hedging mode.
+
+
+--------------------------------------------------------------------------------
+2. HOW THE STRATEGY WORKS (SIMPLE EXPLANATION)
+--------------------------------------------------------------------------------
+
+The strategy uses two Exponential Moving Averages (EMAs) — a fast one and a
+slow one — to decide when to buy and when to exit.
+
+  ENTRY (BUY):
+    When the fast EMA crosses ABOVE the slow EMA (called a "golden cross"),
+    the strategy opens a BUY (long) position. This means the price is starting
+    to trend upward.
+
+  EXIT (close the trade):
+    The trade can be closed in three ways:
+      1. TP hit     — price reaches the Take Profit level (profit target)
+      2. SL hit     — price drops to the Stop Loss level (loss limit)
+      3. Death cross — fast EMA crosses BELOW slow EMA (trend reversal signal)
+
+The strategy ONLY trades long (buys). It never goes short.
+
+
+--------------------------------------------------------------------------------
+3. ENTRY SIGNAL IN DETAIL
+--------------------------------------------------------------------------------
+
+Every bar (candle), the strategy checks:
+
+  Was fast EMA below slow EMA on the PREVIOUS bar?
+  AND is fast EMA now ABOVE slow EMA on THIS bar?
+  → YES: Golden cross detected → open a BUY
+
+  Was fast EMA above slow EMA on the PREVIOUS bar?
+  AND is fast EMA now BELOW slow EMA on THIS bar?
+  → YES: Death cross detected → close all open longs for that instrument
+
+The EMAs are calculated from the bar close prices. The strategy waits for
+enough historical bars to "warm up" before it can trade (warmup_bars = 200).
+
+Configuration:
+  fast_ema_period = 20   (20-bar EMA, reacts faster to price changes)
+  slow_ema_period = 50   (50-bar EMA, smoother long-term trend)
+  bar_spec (live)        = "15-MINUTE-LAST-EXTERNAL"  (15-minute bars)
+  bar_spec (backtest)    = "1-HOUR-LAST-EXTERNAL"     (1-hour bars)
+
+
+--------------------------------------------------------------------------------
+4. STOP LOSS AND TAKE PROFIT
+--------------------------------------------------------------------------------
+
+The SL and TP are set automatically based on the ATR (Average True Range).
+ATR measures how much the price typically moves in one bar — a bigger ATR
+means more volatility, so the SL/TP are wider to avoid being stopped out by
+normal noise.
+
+  ATR period = 14 bars
+
+  Initial SL = entry price  -  (sl_atr_mult × ATR)
+  Initial TP = entry price  +  (tp_atr_mult × ATR)
+
+Live settings:
+  sl_atr_mult = 1.5   →   SL is 1.5 × ATR below entry
+  tp_atr_mult = 3.0   →   TP is 3.0 × ATR above entry
+  Risk-reward ratio  = 3.0 / 1.5 = 2:1
+
+Backtest settings:
+  sl_atr_mult = 2.0
+  tp_atr_mult = 4.0
+  Risk-reward ratio  = 4.0 / 2.0 = 2:1
+
+Example (GOLD, ATR = 10.00, entry at 4000.00):
+  SL = 4000.00 - (1.5 × 10.00) = 3985.00
+  TP = 4000.00 + (3.0 × 10.00) = 4030.00
+
+Every bar, the strategy checks:
+  bar.high >= TP  →  close position (take profit)
+  bar.low  <= SL  →  close position (stop loss)
+
+
+--------------------------------------------------------------------------------
+5. TRAILING STOP (PROTECTING PROFITS)
+--------------------------------------------------------------------------------
+
+This is the key money-management feature. Once a trade moves into profit,
+the stop loss is automatically moved up so you can NEVER lose money on it.
+
+STEP 1 — Move to Breakeven:
+  Once the profit reaches breakeven_r × initial_risk (default = 1.0 × risk),
+  the SL is moved UP to the entry price. At this point, the worst outcome
+  is breaking even — you cannot make a loss on this trade.
+
+  Example: entry = 4000, SL = 3985, risk = 15 points
+  Once price reaches 4015 (profit = 15 = 1 × risk):
+  → SL moves from 3985 up to 4000 (entry = breakeven)
+
+STEP 2 — Trail the Stop:
+  After breakeven, as price continues rising, the SL keeps following it.
+  The SL always stays one "risk distance" below the current close price.
+
+  Example continuing from above:
+  Price rises to 4020 → SL trails to 4020 - 15 = 4005
+  Price rises to 4025 → SL trails to 4025 - 15 = 4010
+  If price then drops, SL stays at 4010 — it never moves down.
+
+The result: the longer the trade runs in profit, the more profit is locked in.
+The trade can only be stopped out with a profit once SL > entry.
+
+Configuration:
+  breakeven_r = 1.0   (move SL to entry after 1R profit)
+  trail_sl    = True  (keep trailing after breakeven)
+
+
+--------------------------------------------------------------------------------
+6. POSITION LIMITS
+--------------------------------------------------------------------------------
+
+The strategy enforces two limits to control total exposure:
+
+  max_per_instrument = 2    max open positions per symbol at any time
+  max_total          = 10   max open positions across ALL symbols combined
+
+If a golden cross fires but a limit is already reached, the signal is skipped.
+The strategy also counts PENDING orders (submitted but not yet filled) toward
+the limit, to prevent a burst of fills after multiple quick crosses.
+
+
+--------------------------------------------------------------------------------
+7. ENTER ON TREND (LIVE ONLY)
+--------------------------------------------------------------------------------
+
+On live trading, enter_on_trend = True.
+
+When the strategy starts up after the warmup period, if the fast EMA is
+already above the slow EMA (price is already trending up), it pretends a
+golden cross just happened and opens a trade immediately. Without this,
+the strategy would wait for the next actual cross, which could take hours
+or days while the trend is already running.
+
+On backtest, enter_on_trend = False (avoids false signals at history start).
+
+
+--------------------------------------------------------------------------------
+8. SYSTEM ARCHITECTURE
+--------------------------------------------------------------------------------
+
+  run_live.py
+    └── TradingNode (NautilusTrader)
+          ├── MT5DataClient         (receives price data from MT5)
+          │     └── worker thread: polls MT5 terminal every 0.25s
+          │           ├── _poll_bars()   — sends new completed bars to strategy
+          │           └── _poll_ticks()  — sends quote ticks (bid/ask)
+          │
+          ├── MT5ExecutionClient    (sends orders to MT5)
+          │     └── worker thread: processes order queue
+          │           └── _send_order()  — calls mt5.order_send()
+          │
+          └── EMACross (strategy)
+                ├── on_bar()             — main logic each bar
+                ├── _manage_positions()  — SL/TP/trailing stop check
+                ├── _open_long()         — submit BUY market order
+                ├── _close_all()         — submit SELL for all open positions
+                ├── on_position_opened() — record entry price, set SL/TP levels
+                └── on_position_closed() — clean up tracking state
+
+Threading model:
+  - All MT5 calls happen in a single daemon worker thread (MT5 is not
+    thread-safe). The asyncio event loop never touches mt5.* directly.
+  - Data flows: worker → call_soon_threadsafe → event loop → strategy.
+  - Orders flow: event loop → queue → worker → mt5.order_send().
+
+
+--------------------------------------------------------------------------------
+9. HOW ORDERS ARE PLACED ON MT5
+--------------------------------------------------------------------------------
+
+When the strategy calls close_position() or submit_order(), NautilusTrader
+routes the command to MT5ExecutionClient._submit_order().
+
+For OPENING a position:
+  - A BUY MARKET order is sent via mt5.order_send()
+  - MT5 returns a position ticket (e.g. 352101107)
+  - This ticket becomes the NautilusTrader PositionId
+  - The strategy's on_position_opened() fires and records SL/TP levels
+
+For CLOSING a position:
+  - A SELL MARKET order is sent with position=<MT5 ticket>
+  - In FxPro hedging mode, specifying position= closes THAT specific trade
+  - Without position=, MT5 would open a new short instead of closing
+
+The MT5 ticket is stored as the NautilusTrader PositionId directly, so
+when a close is needed, command.position_id.value is already the ticket.
+
+
+--------------------------------------------------------------------------------
+10. BACKTEST
+--------------------------------------------------------------------------------
+
+File: run_backtest.py
+Data source: H1 (1-hour) bars from MT5, stored in a Parquet catalog.
+
+To run:
+  .venv\Scripts\python pull_h1.py          # download H1 bars from MT5
+  .venv\Scripts\python build_catalog.py    # convert to Parquet catalog
+  .venv\Scripts\python run_backtest.py     # run the backtest
+
+The backtest saves a checkpoint after each run (.last_run_ts). Subsequent
+runs only process new bars since the last checkpoint (plus a warmup window).
+Use --full flag to force a complete re-run from all history.
+
+
+--------------------------------------------------------------------------------
+11. CONFIGURATION REFERENCE
+--------------------------------------------------------------------------------
+
+EMACrossConfig parameters:
+
+  instruments        List of instrument IDs to trade.
+                     e.g. ("GOLD.FXPRO", "#USNDAQ100.FXPRO")
+
+  bar_spec           Bar type string. Live: "15-MINUTE-LAST-EXTERNAL"
+                     Backtest: "1-HOUR-LAST-EXTERNAL"
+
+  fast_ema_period    Period for the fast EMA. Default: 20
+  slow_ema_period    Period for the slow EMA. Default: 50
+  atr_period         Period for ATR (volatility). Default: 14
+
+  trade_sizes        Lot size per instrument.
+                     e.g. {"GOLD.FXPRO": "0.01"}
+
+  warmup_bars        How many bars to load before trading starts. Default: 200
+                     (needs enough to initialise slow EMA + ATR)
+
+  max_per_instrument Max simultaneous positions per symbol. Default: 2
+  max_total          Max simultaneous positions total. Default: 10
+
+  enter_on_trend     If True, enter immediately after warmup if already
+                     trending. Default: False (True for live)
+
+  sl_atr_mult        Stop loss distance = this × ATR. Default: 2.0
+                     Set to 0.0 to disable SL.
+
+  tp_atr_mult        Take profit distance = this × ATR. Default: 4.0
+                     Set to 0.0 to disable TP.
+                     For 2:1 ratio: tp_atr_mult = 2 × sl_atr_mult
+
+  breakeven_r        Move SL to entry after this many R in profit.
+                     Default: 1.0 (move to breakeven after 1R profit)
+                     Set to 0.0 to disable.
+
+  trail_sl           After breakeven, trail SL behind price. Default: True
+
+
+--------------------------------------------------------------------------------
+12. FILE STRUCTURE
+--------------------------------------------------------------------------------
+
+  run_live.py               Start live trading
+  run_backtest.py           Run backtest on historical data
+  pull_h1.py                Download H1 bars from MT5 terminal
+  build_catalog.py          Convert downloaded bars to Parquet catalog
+  check_symbols.py          Verify exact FxPro symbol names
+  check_live.py             Quick check that live connection works
+
+  strategy/
+    ema_cross.py            The strategy itself (EMACross + EMACrossConfig)
+
+  adapters/mt5/
+    data.py                 MT5DataClient — receives bar and tick data
+    execution.py            MT5ExecutionClient — sends orders to MT5
+    factories.py            Factory classes that build the clients
+    instrument.py           Instrument definitions for all 6 symbols
+    config.py               MT5DataClientConfig
+    exec_config.py          MT5ExecClientConfig
+
+  catalog/                  Parquet data files for backtesting
+  .env                      MT5 login credentials (not in git)
+
+
+--------------------------------------------------------------------------------
+13. HOW TO RUN LIVE
+--------------------------------------------------------------------------------
+
+Prerequisites:
+  1. MetaTrader5 terminal open, logged into FxPro demo
+  2. Tools → Options → Expert Advisors → "Allow Algo Trading" checked
+  3. .venv activated
+
+Create .env file with credentials:
+  MT5_LOGIN=12345678
+  MT5_PASSWORD=yourpassword
+  MT5_SERVER=FxPro-Demo
+
+Run:
+  .venv\Scripts\python run_live.py
+
+Stop:
+  Ctrl+C  — the strategy will close all open positions on shutdown
+
+
+--------------------------------------------------------------------------------
+14. KNOWN BROKER FACTS (FxPro)
+--------------------------------------------------------------------------------
+
+  Symbol name : GOLD (not XAUUSD — that doesn't exist on FxPro)
+  Price precision : 2 decimal places
+  Account currency : JPY
+  Margin mode : Retail Hedging (each trade is its own position)
+  Venue name in code : FXPRO
+
+
+================================================================================
