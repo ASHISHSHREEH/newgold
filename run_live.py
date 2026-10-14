@@ -64,7 +64,7 @@ TRADE_SIZES: dict[str, str] = {
     "#USSPX500.FXPRO":   "0.15",
     "WTI.FXPRO":         "0.1",
     "BITCOIN.FXPRO":     "0.01",
-    "#Japan225.FXPRO":   "0.1",
+    "#Japan225.FXPRO":   "0.03",
 }
 
 # ── Client configs ────────────────────────────────────────────────────────────
