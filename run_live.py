@@ -62,7 +62,7 @@ TRADE_SIZES: dict[str, str] = {
     "GOLD.FXPRO":        "0.01",
     "#USNDAQ100.FXPRO":  "0.03",
     "#USSPX500.FXPRO":   "0.15",
-    "WTI.FXPRO":         "0.1",
+    "WTI.FXPRO":         "0.02",
     "BITCOIN.FXPRO":     "0.01",
     "#Japan225.FXPRO":   "0.03",
 }
