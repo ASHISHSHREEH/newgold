@@ -93,7 +93,7 @@ def _stream(proc: subprocess.Popen, prefix: str, expected_pid: int | None = None
 def _terminate(proc: subprocess.Popen, label: str) -> None:
     """Ask the process to exit gracefully; escalate to kill after GRACEFUL_TIMEOUT.
 
-    On Windows, proc.terminate() is TerminateProcess — an uncatchable hard kill,
+    On Windows, proc.terminate() is TerminateProcess - an uncatchable hard kill,
     so the bot's on_stop (which closes all open positions) would never run. Send
     CTRL_BREAK_EVENT instead: the bot is launched in its own process group (see
     _launch_bot) and turns it into KeyboardInterrupt for a clean shutdown.
@@ -107,12 +107,12 @@ def _terminate(proc: subprocess.Popen, label: str) -> None:
         else:
             proc.terminate()
     except (OSError, ValueError):
-        proc.terminate()  # group gone / not a group leader — fall back
+        proc.terminate()  # group gone / not a group leader - fall back
     try:
         proc.wait(timeout=GRACEFUL_TIMEOUT)
         print(f"[watchdog] {label} exited cleanly.", flush=True)
     except subprocess.TimeoutExpired:
-        print(f"[watchdog] Timeout — force-killing {label} (process tree).", flush=True)
+        print(f"[watchdog] Timeout - force-killing {label} (process tree).", flush=True)
         _force_kill_tree(proc)
         proc.wait()
 
@@ -212,7 +212,7 @@ def main() -> None:
     print(f"[watchdog] Dashboard : http://127.0.0.1:{DASHBOARD_PORT}", flush=True)
     print(f"[watchdog] Flag      : {FLAG_PATH}", flush=True)
 
-    # Start dashboard once — it runs for the whole session
+    # Start dashboard once - it runs for the whole session
     dash_proc = _launch_dashboard(python)
     print(f"[watchdog] Dashboard started  PID={dash_proc.pid}", flush=True)
 
@@ -259,9 +259,9 @@ def main() -> None:
                 bot_proc = _launch_bot(python)
                 print(f"[watchdog] Bot relaunched  PID={bot_proc.pid}", flush=True)
 
-            # ── Dashboard crashed — restart it too ────────────────────────────
+            # ── Dashboard crashed - restart it too ────────────────────────────
             if dash_proc.poll() is not None:
-                print("[watchdog] Dashboard exited — restarting ...", flush=True)
+                print("[watchdog] Dashboard exited - restarting ...", flush=True)
                 dash_proc = _launch_dashboard(python)
                 print(f"[watchdog] Dashboard restarted  PID={dash_proc.pid}", flush=True)
 
@@ -277,7 +277,7 @@ def main() -> None:
                 print(f"[watchdog] Short bot relaunched  PID={short_proc.pid}", flush=True)
 
     except KeyboardInterrupt:
-        print("\n[watchdog] Ctrl+C — shutting down ...", flush=True)
+        print("\n[watchdog] Ctrl+C - shutting down ...", flush=True)
         _terminate(bot_proc, "bot")
         if enable_short and short_proc is not None:
             _terminate(short_proc, "short")
