@@ -1,0 +1,146 @@
+===============================================================================
+ SHORT-SELL STRATEGY  —  EMA crossover (mirror of the live long-only system)
+ newgold / NautilusTrader 1.231.0 / MT5 FxPro demo
+===============================================================================
+
+PURPOSE
+  The live EMACross strategy is long-only: it enters on a golden cross
+  (fast EMA crossing above slow) and never shorts. This document specs the
+  short side so it can run as a mirror — either standalone or as the opposite
+  leg of a long/short strategy on the same 6 instruments.
+
+  FxPro is retail-hedging (OmsType.HEDGING), so a short can be opened
+  independently of any long on the same symbol. No netting conflict.
+
+
+-------------------------------------------------------------------------------
+ 1. INSTRUMENTS & TIMEFRAME  (unchanged from the long system)
+-------------------------------------------------------------------------------
+  Symbols : GOLD, #USNDAQ100, #USSPX500, WTI, BITCOIN, #Japan225
+  Venue   : FXPRO
+  Bars    : 15-MINUTE, LAST, EXTERNAL
+  Account : JPY (positions report USD PnL; broker converts to JPY)
+
+
+-------------------------------------------------------------------------------
+ 2. INDICATORS
+-------------------------------------------------------------------------------
+  fast = ExponentialMovingAverage(20)
+  slow = ExponentialMovingAverage(50)
+  atr  = AverageTrueRange(14, SIMPLE)
+
+  Warm up all three from a 200-bar history request before trading (same as
+  the long side). Only act on CLOSED bars.
+
+
+-------------------------------------------------------------------------------
+ 3. ENTRY — SHORT (the mirror of the golden cross)
+-------------------------------------------------------------------------------
+  Signal: DEATH CROSS
+    prev bar:  fast >= slow
+    this bar:  fast <  slow      --> open SHORT on bar close
+
+  enter_on_trend (optional, mirrors live behaviour, OFF by default):
+    If fast < slow already at warmup, treat it as a fresh death cross and
+    enter short on the next bar.
+    CAUTION: the live long side does this and it opened a mid-trend WTI
+    position on restart that got stopped out. If you enable it on the short
+    side, expect the same — entering an already-extended downtrend. Prefer
+    OFF for shorts unless you specifically want trend-continuation entries.
+
+  Filters to consider (optional):
+    - skip if atr == 0 or history incomplete
+    - respect max positions per instrument and global max (see section 6)
+
+
+-------------------------------------------------------------------------------
+ 4. STOPS & TARGETS  (mirror of the long ATR bracket — flip the sign)
+-------------------------------------------------------------------------------
+  Long side used, per the live logs:
+      SL = entry - 1.5 * ATR
+      TP = entry + 3.0 * ATR        (≈ 1 : 2 risk/reward)
+
+  Short side (mirror):
+      entry = bar close (fill price used for the actual bracket)
+      SL    = entry + 1.5 * ATR     (stop ABOVE price)
+      TP    = entry - 3.0 * ATR     (target BELOW price)
+
+  Software-managed exits (same as live — these are NOT broker-side orders,
+  they are evaluated each bar and closed with a reduce-only MARKET order):
+
+    SL HIT (short):      bar HIGH >= SL          -> close
+    TP HIT (short):      bar LOW  <= TP          -> close
+    SL -> BREAKEVEN:     once profit >= 1.0 * ATR, move SL down to entry
+    SL TRAIL (short):    trail SL downward to   close + 1.5 * ATR
+                         (never move it up; trail only tightens)
+
+  Rounding: round SL/TP to each instrument's price_precision
+            (GOLD = 2 dp / point 0.01). Do not send more precision than the
+            symbol allows or the order is rejected.
+
+
+-------------------------------------------------------------------------------
+ 5. POSITION SIZING  (fix the imbalance seen in the long logs)
+-------------------------------------------------------------------------------
+  Hardcoded lots risk wildly different JPY per instrument. Yesterday's live
+  session: WTI 0.1 lot risked ~8,500 JPY (~5% of a 177k account) while GOLD
+  0.01 lot risked ~580 JPY. Size off money-at-risk instead:
+
+      qty_lots = risk_JPY / (SL_distance * contract_size * usdjpy)
+
+    where
+      SL_distance   = 1.5 * ATR   (price units)
+      contract_size = mt5.symbol_info(sym).trade_contract_size
+                      (e.g. GOLD = 100 oz/lot, WTI = 1000 bbl/lot — VERIFY
+                       per symbol, do not assume)
+      usdjpy        = current USDJPY (positions are USD-denominated)
+      risk_JPY      = fixed per-trade budget, e.g. 0.5% of equity
+
+    Then clamp to the symbol's volume_min / volume_step / volume_max.
+
+  Current fixed WTI size is 0.02 lot (reduced from 0.1) — fine as an interim
+  cap, but the formula above is the real fix.
+
+
+-------------------------------------------------------------------------------
+ 6. RISK LIMITS
+-------------------------------------------------------------------------------
+  max per instrument : 2 concurrent positions   (as in live logs: "pos 1/2")
+  max total          : 10 concurrent positions   ("total 1/10")
+  one entry per bar per instrument
+
+
+-------------------------------------------------------------------------------
+ 7. SHORT-SPECIFIC CAVEATS  (do NOT just mirror and forget these)
+-------------------------------------------------------------------------------
+  - SWAP / CARRY: short swap can be negative on indices/metals held overnight.
+    Check mt5.symbol_info(sym).swap_short before running overnight. Shorts are
+    not symmetric with longs on financing.
+  - GAP RISK: software stops are evaluated on bar data; a gap through your SL
+    (weekend/news) fills worse than SL. More dangerous on the short side of
+    equity indices (melt-up gaps) and crypto (24/7, violent squeezes).
+  - SHORT SQUEEZE: trends up can be faster than trends down. The 1.5 ATR stop
+    that was comfortable long may be too tight short — consider 2.0 ATR.
+  - BITCOIN trades 24/7; the others have sessions. A death cross at an illiquid
+    hour can slip badly on the short entry fill.
+  - Verify the symbol is shortable on the demo and margin is available before
+    assuming the order fills (watch for retcode 10013 / invalid request, which
+    the exec client already handles by synthesising the close fill).
+
+
+-------------------------------------------------------------------------------
+ 8. IMPLEMENTATION NOTES (when you wire it into the Nautilus strategy)
+-------------------------------------------------------------------------------
+  - Read the installed Nautilus API at
+    .venv/Lib/site-packages/nautilus_trader/  — do not write calls from memory.
+  - OMS: HEDGING (short can coexist with a long on the same symbol).
+  - Order: MarketOrder SELL to open; reduce_only MARKET BUY to close.
+  - Tag the entry with SL/TP for the dashboard, e.g. tags=['SL:xxxx','TP:xxxx'],
+    exactly as the long side does.
+  - MonitorActor already tracks opened/closed with reason + rr; the short close
+    reason will be SL / TP / TRAIL just like the long side.
+  - Backtest the short side on M15 history (M5/H1/D1 back to 2008, M1 to ~2020)
+    before going live on the demo. Shorts behave differently across the 2020
+    and 2022 regimes — test both.
+
+===============================================================================

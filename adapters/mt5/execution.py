@@ -270,6 +270,44 @@ class MT5ExecutionClient(LiveExecutionClient):
         raise NotImplementedError("ModifyOrder not supported for MT5 market orders")
 
     # -------------------------------------------------------------------------
+    # Broker-side SL/TP modification (additive - used by the short strategy's
+    # broker-side protection; the live long-only EMACross never calls this,
+    # so its behavior is unchanged).
+    # -------------------------------------------------------------------------
+
+    async def modify_position_sltp(
+        self, position_ticket: int, sl: float | None, tp: float | None
+    ) -> bool:
+        """
+        Update the venue-side SL/TP of an existing MT5 position (TRADE_ACTION_SLTP).
+
+        Returns True on TRADE_RETCODE_DONE. A 10016 (INVALID_STOPS) rejection is
+        treated as benign - the requested stop is inside the broker's freeze
+        distance - so the caller should keep the previous stop and retry later.
+        Proven against FxPro demo in tests/test_sltp_modify.py.
+        """
+        fut: asyncio.Future = self._loop.create_future()
+        self._req_queue.put_nowait(("modify_sltp", int(position_ticket), sl, tp, fut))
+        try:
+            done, retcode, comment = await asyncio.wait_for(fut, timeout=30.0)
+        except asyncio.TimeoutError:
+            self._log.error(f"modify_position_sltp({position_ticket}) timed out")
+            return False
+        if done:
+            return True
+        if retcode == mt5.TRADE_RETCODE_INVALID_STOPS:
+            self._log.info(
+                f"modify_position_sltp({position_ticket}) rejected 10016 "
+                f"INVALID_STOPS (stop too close) - keeping prior stop: {comment}"
+            )
+        else:
+            self._log.warning(
+                f"modify_position_sltp({position_ticket}) failed: "
+                f"retcode {retcode} - {comment}"
+            )
+        return False
+
+    # -------------------------------------------------------------------------
     # Reconciliation (called at startup by the exec engine)
     # -------------------------------------------------------------------------
 
@@ -351,6 +389,11 @@ class MT5ExecutionClient(LiveExecutionClient):
                     self._loop.call_soon_threadsafe(
                         self._deferred_account_state, balances, ts
                     )
+
+            elif kind == "modify_sltp":
+                _, ticket, sl, tp, fut = item
+                result = self._send_sltp(ticket, sl, tp)
+                self._loop.call_soon_threadsafe(_resolve_future, fut, result, None)
 
     def _send_order(self, command: SubmitOrder, mt5_close_ticket: int | None) -> tuple:
         """
@@ -436,6 +479,34 @@ class MT5ExecutionClient(LiveExecutionClient):
                 return synthesized
 
         return (result.retcode, 0, 0, 0.0, 0.0, 0, result.comment)
+
+    def _send_sltp(self, position_ticket: int, sl: float | None, tp: float | None) -> tuple:
+        """
+        Modify an open position's SL/TP at the venue via TRADE_ACTION_SLTP.
+        Worker-thread only (the one place mt5.* may be called).
+
+        Returns (done: bool, retcode: int, comment: str) so the event-loop side
+        can distinguish a benign 10016 INVALID_STOPS from a real failure.
+        """
+        positions = mt5.positions_get(ticket=position_ticket)
+        if not positions:
+            return (False, -1, f"position {position_ticket} not found")
+        symbol = positions[0].symbol
+
+        request: dict[str, Any] = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": symbol,
+            "position": position_ticket,
+        }
+        if sl is not None:
+            request["sl"] = round(sl, 5)
+        if tp is not None:
+            request["tp"] = round(tp, 5)
+
+        result = mt5.order_send(request)
+        if result is None:
+            return (False, -1, f"order_send(SLTP) returned None: {mt5.last_error()}")
+        return (result.retcode == mt5.TRADE_RETCODE_DONE, result.retcode, result.comment)
 
     def _synthesize_external_close(self, close_ticket: int) -> tuple | None:
         """

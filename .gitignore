@@ -22,6 +22,11 @@ live_err.txt
 
 # ── Large data exports (regenerated from MT5 / the catalog) ───────────────
 gold_h1.csv
+data_h1/
+catalog_multi/
+
+# ── Local safety backups (not source; see pre-short-strategy-* git tag) ───
+backup/
 
 # ── Local tooling / OS ───────────────────────────────────────────────────
 .claude/

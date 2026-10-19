@@ -70,7 +70,17 @@ def _size_increment(precision: int) -> Quantity:
     return Quantity.from_str(f"{10 ** -precision:.{precision}f}")
 
 
-def build_gold_instrument() -> CurrencyPair:
+def build_gold_instrument(multiplier: int = 1) -> CurrencyPair:
+    """
+    Build the GOLD instrument.
+
+    multiplier : int, default 1
+        Contract-size multiplier used by Nautilus for notional/PnL
+        (notional = quantity * multiplier * price). FxPro GOLD is 100 oz/lot,
+        so pass multiplier=100 for correct JPY/USD P&L in backtests. The default
+        stays 1 so the LIVE system (build_all_instruments) is unchanged; the live
+        MT5 adapter sends raw lot volume to the broker and does not use this value.
+    """
     return CurrencyPair(
         instrument_id=InstrumentId(Symbol("GOLD"), _VENUE),
         raw_symbol=Symbol("GOLD"),
@@ -80,6 +90,7 @@ def build_gold_instrument() -> CurrencyPair:
         size_precision=2,
         price_increment=_price_increment(2),
         size_increment=_size_increment(2),
+        multiplier=Quantity.from_int(multiplier),
         ts_event=0,
         ts_init=0,
     )
