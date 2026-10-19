@@ -2,15 +2,18 @@
 Watchdog for run_live.py + dashboard.py.
 
 Start everything with a single command:
-    .venv\\Scripts\\python watchdog.py
+    .venv\\Scripts\\python watchdog.py            # dashboard + long bot
+    .venv\\Scripts\\python watchdog.py --short     # also manage the S4 short bot
 
 The watchdog:
 - Launches dashboard.py once (stays up for the whole session).
 - Launches run_live.py (the trading bot), streaming its stdout here.
+- With --short, also launches run_live_short.py (S4-on-crypto); crash-relaunched
+  like the long bot. OFF by default (shorts are a bear-regime bet).
 - Checks data/restart_request.flag every 5 s.
   If found: deletes it, gracefully terminates the bot, waits 5 s, relaunches.
 - If the bot crashes on its own: relaunches after 10 s.
-- Ctrl+C: terminates both the bot and the dashboard, then exits.
+- Ctrl+C: terminates the bot(s) and the dashboard, then exits.
 
 Dashboard is at http://127.0.0.1:5000 once started.
 """
@@ -33,6 +36,7 @@ _NODE_PID_RE = re.compile(r"TradingNode:\s*PID:\s*(\d+)")
 
 BASE_DIR       = Path(__file__).parent
 BOT_SCRIPT     = BASE_DIR / "run_live.py"
+SHORT_SCRIPT   = BASE_DIR / "run_live_short.py"
 DASH_SCRIPT    = BASE_DIR / "dashboard.py"
 FLAG_PATH      = BASE_DIR / "data" / "restart_request.flag"
 DASHBOARD_PORT = 5000
@@ -150,6 +154,29 @@ def _launch_bot(python: str) -> subprocess.Popen:
     return proc
 
 
+def _launch_short(python: str) -> subprocess.Popen:
+    """Start run_live_short.py (optional S4-on-crypto short bot), streaming its
+    output tagged [short]. Own process group on Windows so CTRL_BREAK_EVENT gives
+    it a graceful stop (same as the long bot).
+
+    Same start-flat caveat as the long bot: a crash-relaunch while a short is open
+    will orphan it (reconciliation=False)."""
+    kwargs = {}
+    if _IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    proc = subprocess.Popen(
+        [python, str(SHORT_SCRIPT)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(BASE_DIR),
+        **kwargs,
+    )
+    threading.Thread(target=_stream, args=(proc, "short", proc.pid), daemon=True).start()
+    return proc
+
+
 def _launch_dashboard(python: str) -> subprocess.Popen:
     """Start dashboard.py in the background; suppress its noisy startup lines."""
     import os
@@ -169,7 +196,10 @@ def _launch_dashboard(python: str) -> subprocess.Popen:
 
 
 def main() -> None:
-    for script in (BOT_SCRIPT, DASH_SCRIPT):
+    enable_short = "--short" in sys.argv
+
+    required = [BOT_SCRIPT, DASH_SCRIPT] + ([SHORT_SCRIPT] if enable_short else [])
+    for script in required:
         if not script.exists():
             print(f"[watchdog] ERROR: {script} not found.", flush=True)
             sys.exit(1)
@@ -189,6 +219,12 @@ def main() -> None:
     # Start the trading bot
     bot_proc = _launch_bot(python)
     print(f"[watchdog] Bot started        PID={bot_proc.pid}", flush=True)
+
+    # Optionally start the S4 short bot (OFF unless --short)
+    short_proc = None
+    if enable_short:
+        short_proc = _launch_short(python)
+        print(f"[watchdog] Short bot started  PID={short_proc.pid}", flush=True)
 
     try:
         while True:
@@ -229,9 +265,22 @@ def main() -> None:
                 dash_proc = _launch_dashboard(python)
                 print(f"[watchdog] Dashboard restarted  PID={dash_proc.pid}", flush=True)
 
+            # ── Short bot crashed / exited unexpectedly ───────────────────────
+            if enable_short and short_proc.poll() is not None:
+                print(
+                    f"[watchdog] Short bot exited unexpectedly "
+                    f"(code={short_proc.poll()}). Relaunching in {CRASH_RELAUNCH_WAIT}s ...",
+                    flush=True,
+                )
+                time.sleep(CRASH_RELAUNCH_WAIT)
+                short_proc = _launch_short(python)
+                print(f"[watchdog] Short bot relaunched  PID={short_proc.pid}", flush=True)
+
     except KeyboardInterrupt:
         print("\n[watchdog] Ctrl+C — shutting down ...", flush=True)
         _terminate(bot_proc, "bot")
+        if enable_short and short_proc is not None:
+            _terminate(short_proc, "short")
         _terminate(dash_proc, "dashboard")
         print("[watchdog] Done.", flush=True)
         sys.exit(0)
